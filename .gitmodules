@@ -1,0 +1,12 @@
+[submodule "lps_libraries/utils"]
+	path = lps_libraries/utils
+	url = git@github.com:labsonar/utils.git
+[submodule "lps_libraries/signal_processing"]
+	path = lps_libraries/signal_processing
+	url = git@github.com:labsonar/signal_processing.git
+[submodule "lps_libraries/acoustic_synthesis"]
+	path = lps_libraries/acoustic_synthesis
+	url = git@github.com:labsonar/acoustic_synthesis.git
+[submodule "lps_libraries/ml"]
+	path = lps_libraries/ml
+	url = git@github.com:labsonar/ml.git
