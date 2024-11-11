@@ -1,4 +1,4 @@
-from diffwave.inference import predict as diffwave_predict
+from model_lib.inference import predict as diffwave_predict
 import torchaudio
 import torchaudio.transforms as TT
 import torch
