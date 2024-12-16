@@ -100,20 +100,25 @@ class DiffWaveLearner:
 
   def train(self, max_steps=None):
     device = next(self.model.parameters()).device
-    while True:
-      for features in tqdm(self.dataset, desc=f'Epoch {self.step // len(self.dataset)}') if self.is_master else self.dataset:
-        if max_steps is not None and self.step >= max_steps:
-          return
-        features = _nested_map(features, lambda x: x.to(device) if isinstance(x, torch.Tensor) else x)
-        loss = self.train_step(features)
-        if torch.isnan(loss).any():
-          raise RuntimeError(f'Detected NaN loss at step {self.step}.')
-        if self.is_master:
-          if self.step % 50 == 0:
-            self._write_summary(self.step, features, loss)
-          if self.step % len(self.dataset) == 0:
-            self.save_to_checkpoint()
-        self.step += 1
+    num_batches = len(self.dataset)
+
+    with tqdm(desc='Epoch', total=max_steps // num_batches if max_steps else None, leave=False, position=0) as epoch_pbar:
+      while True:
+        for features in tqdm(self.dataset, desc=f'Batch', leave=False, position=1):
+          if max_steps is not None and self.step >= max_steps:
+            return
+          features = _nested_map(features, lambda x: x.to(device) if isinstance(x, torch.Tensor) else x)
+          loss = self.train_step(features)
+          if torch.isnan(loss).any():
+            raise RuntimeError(f'Detected NaN loss at step {self.step}.')
+          if self.is_master:
+            if self.step % 50 == 0:
+              self._write_summary(self.step, features, loss)
+            if self.step % len(self.dataset) == 0:
+              self.save_to_checkpoint()
+          self.step += 1
+
+        epoch_pbar.update(1)
 
   def train_step(self, features):
     for param in self.model.parameters():
