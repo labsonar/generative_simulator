@@ -1,4 +1,4 @@
-from model_lib.inference import predict as diffwave_predict
+from diffwave.inference import predict as diffwave_predict
 import torchaudio
 import torchaudio.transforms as TT
 import torch
@@ -78,4 +78,5 @@ print("Forma do áudio:", audio.shape)  # Deve ser [C, T]
 audio = audio.cpu()
 
 # Agora você pode salvar o áudio
+os.makedirs(output_dir, exist_ok=True)
 torchaudio.save(os.path.join(output_dir, filename), audio, sample_rate=sample_rate)
