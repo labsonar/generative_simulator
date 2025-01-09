@@ -17,6 +17,7 @@ import numpy as np
 import os
 import torch
 import torch.nn as nn
+import matplotlib.pyplot as plt
 
 from torch.nn.parallel import DistributedDataParallel
 from torch.utils.tensorboard import SummaryWriter
@@ -101,7 +102,8 @@ class DiffWaveLearner:
   def train(self, max_steps=None):
     device = next(self.model.parameters()).device
     num_batches = len(self.dataset)
-
+    losses=[]
+    print("/n1AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAa/n")
     with tqdm(desc='Epoch', total=max_steps // num_batches if max_steps else None, leave=False, position=0) as epoch_pbar:
       while True:
         for features in tqdm(self.dataset, desc=f'Batch', leave=False, position=1):
@@ -109,6 +111,7 @@ class DiffWaveLearner:
             return
           features = _nested_map(features, lambda x: x.to(device) if isinstance(x, torch.Tensor) else x)
           loss = self.train_step(features)
+          losses.append(loss.item())
           if torch.isnan(loss).any():
             raise RuntimeError(f'Detected NaN loss at step {self.step}.')
           if self.is_master:
@@ -119,6 +122,13 @@ class DiffWaveLearner:
           self.step += 1
 
         epoch_pbar.update(1)
+        print("/n2AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAa/n")
+        plt.plot(losses)
+        plt.savefig(f'{self.model_dir}/loss.png')
+        plt.close()
+        print(losses)
+        print(f'{self.model_dir}/loss.png')
+
 
   def train_step(self, features):
     for param in self.model.parameters():
