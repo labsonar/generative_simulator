@@ -108,6 +108,9 @@ class DiffWaveLearner:
       while True:
         for features in tqdm(self.dataset, desc=f'Batch', leave=False, position=1):
           if max_steps is not None and self.step >= max_steps:
+            plt.plot(losses)
+            plt.savefig(f'{self.model_dir}/loss.png')
+            plt.close()
             return
           features = _nested_map(features, lambda x: x.to(device) if isinstance(x, torch.Tensor) else x)
           loss = self.train_step(features)
@@ -122,12 +125,9 @@ class DiffWaveLearner:
           self.step += 1
 
         epoch_pbar.update(1)
-        print("/n2AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAa/n")
-        plt.plot(losses)
-        plt.savefig(f'{self.model_dir}/loss.png')
-        plt.close()
-        print(losses)
-        print(f'{self.model_dir}/loss.png')
+        #print("/n2AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAa/n")
+        #print(losses)
+        #print(f'{self.model_dir}/loss.png')
 
 
   def train_step(self, features):
