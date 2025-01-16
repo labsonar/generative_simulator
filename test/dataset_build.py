@@ -5,11 +5,11 @@ from scipy.signal import resample
 import numpy as np
 import os
 
-df = pd.read_csv("./data/data.csv")
+df = pd.read_csv("/home/leticia.luz/Documents/generative_simulator/generative_simulator/data/data.csv")
 
 # class_id = "pilot_vessel"
 class_id = "bulk_carrier"
-filenames = glob(f"./data/Raw/{class_id}/*.wav", recursive=True)
+filenames = glob(f"/data/{class_id}/*.wav", recursive=True)
 
 # Certifique-se de que a pasta de saida existe
 output_dir = f"./data/Slices/{class_id}"
@@ -51,7 +51,7 @@ for filename in filenames:
         audio_segment_resampled = resample(audio_segment, num_samples)
         
         # Cria o caminho para salvar o arquivo na pasta "./test"
-        new_filename = os.path.join(output_dir, os.path.basename(filename))
+        new_filename = os.path.join('./trn_data', os.path.basename(filename))
         
         # Salva o segmento redimensionado em 16 kHz em um novo arquivo .wav
         wavfile.write(new_filename, target_sample_rate, audio_segment_resampled.astype(np.int16))

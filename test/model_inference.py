@@ -8,6 +8,8 @@ from argparse import ArgumentParser
 from model_lib.inference import predict
 from model_lib.params import AttrDict, params as base_params
 
+# requer que o espectrograma seja fornecido explicitamente ou gerado previamente
+
 def main(args):
   os.makedirs(args.output,exist_ok=True)
 

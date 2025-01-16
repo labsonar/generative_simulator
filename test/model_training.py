@@ -13,6 +13,8 @@
 # limitations under the License.
 # ==============================================================================
 
+# requer que o espectrograma seja fornecido explicitamente ou gerado previamente
+
 from argparse import ArgumentParser
 from torch.cuda import device_count
 from torch.multiprocessing import spawn
