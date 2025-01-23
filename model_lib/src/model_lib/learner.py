@@ -50,6 +50,7 @@ class DiffWaveLearner:
     self.scaler = torch.cuda.amp.GradScaler(enabled=kwargs.get('fp16', False))
     self.step = 0
     self.is_master = True
+    self.losses=[]
 
     beta = np.array(self.params.noise_schedule)
     noise_level = np.cumprod(1 - beta)
@@ -83,6 +84,9 @@ class DiffWaveLearner:
     save_basename = f'{filename}-{self.step}.pt'
     save_name = f'{self.model_dir}/{save_basename}'
     link_name = f'{self.model_dir}/{filename}.pt'
+    plt.plot(self.losses)
+    plt.savefig(f'{self.model_dir}/loss.png')
+    plt.close()
     torch.save(self.state_dict(), save_name)
     if os.name == 'nt':
       torch.save(self.state_dict(), link_name)
@@ -102,32 +106,35 @@ class DiffWaveLearner:
   def train(self, max_steps=None):
     device = next(self.model.parameters()).device
     num_batches = len(self.dataset)
-    losses=[]
-    print("/n1AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAa/n")
+  
+
     with tqdm(desc='Epoch', total=max_steps // num_batches if max_steps else None, leave=False, position=0) as epoch_pbar:
+
+      epoch = 0
+
       while True:
         for features in tqdm(self.dataset, desc=f'Batch', leave=False, position=1):
           if max_steps is not None and self.step >= max_steps:
-            plt.plot(losses)
-            plt.savefig(f'{self.model_dir}/loss.png')
-            plt.close()
             return
           features = _nested_map(features, lambda x: x.to(device) if isinstance(x, torch.Tensor) else x)
           loss = self.train_step(features)
-          losses.append(loss.item())
+          self.losses.append(loss.item())
           if torch.isnan(loss).any():
             raise RuntimeError(f'Detected NaN loss at step {self.step}.')
           if self.is_master:
-            if self.step % 50 == 0:
-              self._write_summary(self.step, features, loss)
-            if self.step % len(self.dataset) == 0:
+            if epoch % self.params.n_check == 0:
+
               self.save_to_checkpoint()
+            #if self.step % 50 == 0:
+             # self._write_summary(self.step, features, loss)
+            #if self.step % len(self.dataset) == 0:
+             # self.save_to_checkpoint()
+
           self.step += 1
+        epoch_pbar.update(1)
+        epoch += 1
 
         epoch_pbar.update(1)
-        #print("/n2AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAa/n")
-        #print(losses)
-        #print(f'{self.model_dir}/loss.png')
 
 
   def train_step(self, features):
