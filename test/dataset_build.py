@@ -5,7 +5,7 @@ from scipy.signal import resample
 import numpy as np
 import os
 
-df = pd.read_csv("/home/leticia.luz/Documents/generative_simulator/generative_simulator/data/data.csv")
+df = pd.read_csv("./data/data.csv")
 
 # class_id = "pilot_vessel"
 class_id = "bulk_carrier"

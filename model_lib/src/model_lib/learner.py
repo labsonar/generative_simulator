@@ -48,8 +48,9 @@ class DiffWaveLearner:
     self.params = params
     self.autocast = torch.cuda.amp.autocast(enabled=kwargs.get('fp16', False))
     self.scaler = torch.cuda.amp.GradScaler(enabled=kwargs.get('fp16', False))
-    self.step = 0
+    self.epoch = 0
     self.is_master = True
+    
 
     beta = np.array(self.params.noise_schedule)
     noise_level = np.cumprod(1 - beta)
@@ -63,7 +64,7 @@ class DiffWaveLearner:
     else:
       model_state = self.model.state_dict()
     return {
-        'step': self.step,
+        'epoch': self.epoch,
         'model': { k: v.cpu() if isinstance(v, torch.Tensor) else v for k, v in model_state.items() },
         'optimizer': { k: v.cpu() if isinstance(v, torch.Tensor) else v for k, v in self.optimizer.state_dict().items() },
         'params': dict(self.params),
@@ -77,13 +78,17 @@ class DiffWaveLearner:
       self.model.load_state_dict(state_dict['model'])
     self.optimizer.load_state_dict(state_dict['optimizer'])
     self.scaler.load_state_dict(state_dict['scaler'])
-    self.step = state_dict['step']
+    self.epoch = state_dict['epoch']
 
   def save_to_checkpoint(self, filename='weights'):
-    save_basename = f'{filename}-{self.step}.pt'
+    save_basename = f'{filename}-{self.epoch}.pt'
     save_name = f'{self.model_dir}/{save_basename}'
     link_name = f'{self.model_dir}/{filename}.pt'
     torch.save(self.state_dict(), save_name)
+    plt.plot(self.losses)
+    plt.savefig(f'{self.model_dir}/loss.png')
+    plt.close()
+
     if os.name == 'nt':
       torch.save(self.state_dict(), link_name)
     else:
@@ -102,33 +107,32 @@ class DiffWaveLearner:
   def train(self, max_steps=None):
     device = next(self.model.parameters()).device
     num_batches = len(self.dataset)
-    losses=[]
-    print("/n1AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAa/n")
-    with tqdm(desc='Epoch', total=max_steps // num_batches if max_steps else None, leave=False, position=0) as epoch_pbar:
+    self.losses=[]
+     
+    with tqdm(desc='Epoch', total=max_steps if max_steps else None, leave=False, position=0) as epoch_pbar:
+           
       while True:
         for features in tqdm(self.dataset, desc=f'Batch', leave=False, position=1):
-          if max_steps is not None and self.step >= max_steps:
-            plt.plot(losses)
-            plt.savefig(f'{self.model_dir}/loss.png')
-            plt.close()
+          if max_steps is not None and self.epoch > max_steps:
             return
           features = _nested_map(features, lambda x: x.to(device) if isinstance(x, torch.Tensor) else x)
           loss = self.train_step(features)
-          losses.append(loss.item())
+          self.losses.append(loss.item())
           if torch.isnan(loss).any():
-            raise RuntimeError(f'Detected NaN loss at step {self.step}.')
+            raise RuntimeError(f'Detected NaN loss at epoch {self.epoch}.')
           if self.is_master:
-            if self.step % 50 == 0:
-              self._write_summary(self.step, features, loss)
-            if self.step % len(self.dataset) == 0:
-              self.save_to_checkpoint()
-          self.step += 1
-
+            if self.epoch % self.params.n_check == 0:
+              self.save_to_checkpoint()   
+            #if self.step % 50 == 0:
+             # self._write_summary(self.step, features, loss)
+            #if self.step % len(self.dataset) == 0:
+             # self.save_to_checkpoint()
+          
+        
         epoch_pbar.update(1)
-        #print("/n2AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAa/n")
-        #print(losses)
-        #print(f'{self.model_dir}/loss.png')
-
+        self.epoch += 1
+        
+                        
 
   def train_step(self, features):
     for param in self.model.parameters():
@@ -176,6 +180,7 @@ def _train_impl(replica_id, model, dataset, args, params):
   learner = DiffWaveLearner(args.model_dir, model, dataset, opt, params, fp16=args.fp16)
   learner.is_master = (replica_id == 0)
   learner.restore_from_checkpoint()
+
   learner.train(max_steps=args.max_steps)
 
 
