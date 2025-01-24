@@ -2,6 +2,7 @@ result
 # Arquivos
 data
 model
+trn_data
 
 #Libraries
 template_library

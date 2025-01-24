@@ -13,7 +13,7 @@ def main(args):
 	analysis = lps.SpectralAnalysis.SPECTROGRAM
 	normalization = signal.Normalization.NORM_L2
 
-	output_dir = f"/home/leticia.luz/Documents/generative_simulator/generative_simulator/data/plots"
+	output_dir = f"./data/plots"
 	os.makedirs(output_dir, exist_ok=True)
 
 	specs = []

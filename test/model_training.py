@@ -13,8 +13,6 @@
 # limitations under the License.
 # ==============================================================================
 
-# requer que o espectrograma seja fornecido explicitamente ou gerado previamente
-
 from argparse import ArgumentParser
 from torch.cuda import device_count
 from torch.multiprocessing import spawn
@@ -51,4 +49,6 @@ if __name__ == '__main__':
       help='maximum number of training steps')
   parser.add_argument('--fp16', action='store_true', default=False,
       help='use 16-bit floating point operations for training')
+  parser.add_argument('--n_check', '-n', default=1, type=int,
+      help='number of save checkpoint')
   main(parser.parse_args())
