@@ -50,7 +50,7 @@ class DiffWaveLearner:
     self.scaler = torch.cuda.amp.GradScaler(enabled=kwargs.get('fp16', False))
     self.epoch = 0
     self.is_master = True
-    
+    self.losses=[]
 
     beta = np.array(self.params.noise_schedule)
     noise_level = np.cumprod(1 - beta)
@@ -84,6 +84,9 @@ class DiffWaveLearner:
     save_basename = f'{filename}-{self.epoch}.pt'
     save_name = f'{self.model_dir}/{save_basename}'
     link_name = f'{self.model_dir}/{filename}.pt'
+    plt.plot(self.losses)
+    plt.savefig(f'{self.model_dir}/loss.png')
+    plt.close()
     torch.save(self.state_dict(), save_name)
     plt.plot(self.losses)
     plt.savefig(f'{self.model_dir}/loss.png')
@@ -107,7 +110,7 @@ class DiffWaveLearner:
   def train(self, max_steps=None):
     device = next(self.model.parameters()).device
     num_batches = len(self.dataset)
-    self.losses=[]
+    
      
     with tqdm(desc='Epoch', total=max_steps if max_steps else None, leave=False, position=0) as epoch_pbar:
            
