@@ -69,6 +69,7 @@ class DiffWaveLearner:
         'optimizer': { k: v.cpu() if isinstance(v, torch.Tensor) else v for k, v in self.optimizer.state_dict().items() },
         'params': dict(self.params),
         'scaler': self.scaler.state_dict(),
+        'losses': self.losses,
     }
 
   def load_state_dict(self, state_dict):
@@ -79,6 +80,7 @@ class DiffWaveLearner:
     self.optimizer.load_state_dict(state_dict['optimizer'])
     self.scaler.load_state_dict(state_dict['scaler'])
     self.epoch = state_dict['epoch']
+    self.losses = state_dict['losses']
 
   def save_to_checkpoint(self, filename='weights'):
     save_basename = f'{filename}-{self.epoch}.pt'
@@ -88,9 +90,7 @@ class DiffWaveLearner:
     plt.savefig(f'{self.model_dir}/loss.png')
     plt.close()
     torch.save(self.state_dict(), save_name)
-    plt.plot(self.losses)
-    plt.savefig(f'{self.model_dir}/loss.png')
-    plt.close()
+    
 
     if os.name == 'nt':
       torch.save(self.state_dict(), link_name)
@@ -112,7 +112,7 @@ class DiffWaveLearner:
     num_batches = len(self.dataset)
     
      
-    with tqdm(desc='Epoch', total=max_steps if max_steps else None, leave=False, position=0) as epoch_pbar:
+    with tqdm(desc='Epoch', total=max_steps if max_steps else None, leave=False, position=0, initial=self.epoch) as epoch_pbar:
            
       while True:
         for features in tqdm(self.dataset, desc=f'Batch', leave=False, position=1):

@@ -30,7 +30,12 @@ class AttrDict(dict):
     elif attrs is not None:
       raise NotImplementedError
     return self
-
+  
+  
+time_params = AttrDict(
+  seconds = 5,
+  sample_rate = 16000,
+)
 
 params = AttrDict(
     # Training params
@@ -55,6 +60,7 @@ params = AttrDict(
     inference_noise_schedule=[0.0001, 0.001, 0.01, 0.05, 0.2, 0.5],
 
     # unconditional sample len
-    
-    audio_len = 16000*5, # unconditional_synthesis_samples
+    audio_len = time_params.sample_rate*time_params.seconds,       
+    #audio_len = 16000*5, # unconditional_synthesis_samples
+   
 )
