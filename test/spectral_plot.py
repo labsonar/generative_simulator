@@ -8,7 +8,7 @@ import lps_sp.signal as signal
 import ml.visualization as vis
 import os
 
-print("oi")
+
 def main(args):
 	analysis = lps.SpectralAnalysis.SPECTROGRAM
 	normalization = signal.Normalization.NORM_L2
@@ -20,20 +20,16 @@ def main(args):
 	labels = []
 
 	class_idx = 0
-	print("PPPPPPPPPPPPPP")
-	print(args.dirs)
 	for directory in args.dirs:
 
 
 		filenames = glob(f"{directory}/*.wav")
-		print('CHEGOU AQUI ')
 		if not filenames:
 			print(f"No .wav files found in {directory}")
 			continue
 
 		for filename in filenames:
 			fs, data = scipy_wav.read(filename)
-			print('lendo')
 			S, f, t = analysis.apply(data=data, fs=fs)
 			mean = np.mean(S, axis=1)
 			norm_mean = normalization.apply(mean)
@@ -43,7 +39,7 @@ def main(args):
 
 			# Plota o espectrograma médio
 			plt.plot(f, norm_mean)
-			print('PLOTANDOOOOOOOooooooo')
+			
 
 		# Salva o gráfico de espectrograma para o diretório atual
 		plt.title(f"Spectrogram Mean - {os.path.basename(directory)}")
