@@ -34,7 +34,7 @@ class AttrDict(dict):
   
 time_params = AttrDict(
   seconds = 5,
-  sample_rate = 16000,
+  sample_rate = 22050,
 )
 
 params = AttrDict(
@@ -45,7 +45,7 @@ params = AttrDict(
     n_check = 10,
 
     # Data params
-    sample_rate=16000,
+    sample_rate = time_params.sample_rate,
     n_mels=80,
     n_fft=1024,
     hop_samples=256,
@@ -53,7 +53,7 @@ params = AttrDict(
 
     # Model params 
     residual_layers=15, 
-    residual_channels=64,
+    residual_channels=48,
     dilation_cycle_length=10,
     unconditional = True,
     noise_schedule=np.linspace(1e-4, 0.05, 10).tolist(),
@@ -61,6 +61,6 @@ params = AttrDict(
 
     # unconditional sample len
     audio_len = time_params.sample_rate*time_params.seconds,       
-    #audio_len = 16000*5, # unconditional_synthesis_samples
+    
    
 )
