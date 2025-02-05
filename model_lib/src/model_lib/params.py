@@ -33,7 +33,7 @@ class AttrDict(dict):
   
   
 time_params = AttrDict(
-  seconds = 5,
+  seconds = 15,
   sample_rate = 22050,
 )
 
@@ -52,8 +52,8 @@ params = AttrDict(
     crop_mel_frames=62,  # Probably an error in paper.
 
     # Model params 
-    residual_layers=15, 
-    residual_channels=48,
+    residual_layers=10, 
+    residual_channels=21,
     dilation_cycle_length=10,
     unconditional = True,
     noise_schedule=np.linspace(1e-4, 0.05, 10).tolist(),
