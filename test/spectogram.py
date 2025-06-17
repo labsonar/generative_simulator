@@ -7,7 +7,7 @@ import matplotlib.pyplot as plt
 import scipy.io.wavfile as scipy_wav
 
 ## Carregar o áudio
-audio_path = './data/audio_original.wav'  # Substitua pelo seu caminho de áudio
+audio_path = '/home/leticia.luz/Documents/generative_simulator/data/audio_original.wav'  # Substitua pelo seu caminho de áudio
 sample_rate, waveform = scipy_wav.read(audio_path)
 
 waveform = torch.tensor(waveform, dtype=torch.float32).reshape(1, -1)
