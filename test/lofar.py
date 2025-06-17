@@ -222,7 +222,7 @@ if __name__ == "__main__":
 ############################################### Caminho inputs
 
     # Opção 2: Processar todos os áudios de uma pasta
-    audio_folder = "/home/vitoria.freire/Documents/generative_simulator/test/4classes_CPA_15s/D"  # Substitua pelo caminho da sua pasta
+    audio_folder = "/home/leticia.luz/Documents/generative_simulator/test/4classes_CPA_15s/D"  # Substitua pelo caminho da sua pasta
     processor.process_audio_folder(audio_folder)
 
 
@@ -231,4 +231,3 @@ if __name__ == "__main__":
     # Perguntar pro natanael o funcionamento da funcao tpsw
     # Perguntar o sentido de os graficos serem apresentados para a classe inteira
     # Perguntar se faz sentido os gr[aficos de LOFAR apresentarem coloracao completamente verde
-cbar.ax.set_ylabel('dB',fontweight='bold') 
