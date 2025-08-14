@@ -23,7 +23,7 @@ from concurrent.futures import ProcessPoolExecutor
 from glob import glob
 from tqdm import tqdm
 
-from model_lib.params import params
+from model_lib.old.params import params
 
 
 def transform(filename):

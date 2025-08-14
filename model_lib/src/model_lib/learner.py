@@ -1,211 +1,201 @@
-# Copyright 2020 LMNT, Inc. All Rights Reserved.
-#
-# Licensed under the Apache License, Version 2.0 (the "License");
-# you may not use this file except in compliance with the License.
-# You may obtain a copy of the License at
-#
-#     http://www.apache.org/licenses/LICENSE-2.0
-#
-# Unless required by applicable law or agreed to in writing, software
-# distributed under the License is distributed on an "AS IS" BASIS,
-# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-# See the License for the specific language governing permissions and
-# limitations under the License.
-# ==============================================================================
+import os
+import typing
+import tqdm
+import argparse
+import shutil
 
 import numpy as np
-import os
-import torch
-import torch.nn as nn
 import matplotlib.pyplot as plt
 
-from torch.nn.parallel import DistributedDataParallel
-from torch.utils.tensorboard import SummaryWriter
-from tqdm import tqdm
+import torch
+import torch.nn as torch_nn
+import torch.utils.data as torch_data
 
-from model_lib.dataset import from_path, from_gtzan
-from model_lib.model import DiffWave
-from model_lib.params import AttrDict
+import model_lib.model as model_model
+import ml.models.utils as ml_utils
+
+
+class TrainingConfig():
+    def __init__(self,
+                    model_dir: str,
+                    batch_size: int = 16,
+                    learning_rate: float = 2e-4,
+                    max_grad_norm: float = 1e9,
+                    epoch_save_interval: int = 10,
+                    max_steps: typing.Optional[int] = 1024):
+            self.model_dir = model_dir
+            self.batch_size = batch_size
+            self.learning_rate = learning_rate
+            self.max_grad_norm = max_grad_norm
+            self.epoch_save_interval = epoch_save_interval
+            self.max_steps = max_steps
+
+    @staticmethod
+    def add_arg_opt(parser: argparse.ArgumentParser) -> None:
+        group = parser.add_argument_group("TrainingConfig")
+        group.add_argument('--model_dir', type=str, required=True)
+        group.add_argument('--batch_size', type=int, default=16)
+        group.add_argument('--learning_rate', type=float, default=2e-4)
+        group.add_argument('--max_grad_norm', type=float, default=1e9)
+        group.add_argument('--epoch_save_interval', type=int, default=10)
+        group.add_argument('--max_steps', type=int, default=1024)
+
+    @staticmethod
+    def from_argparse(args: argparse.Namespace) -> "TrainingConfig":
+        return TrainingConfig(
+            model_dir=args.model_dir,
+            batch_size=args.batch_size,
+            learning_rate=args.learning_rate,
+            max_grad_norm=args.max_grad_norm,
+            epoch_save_interval=args.epoch_save_interval,
+            max_steps=args.max_steps
+        )
+
+def train(override: bool,
+          backup: bool,
+          dataset: torch_data.Dataset,
+          model_config: model_model.UnconditionalConfig,
+          training_config: TrainingConfig):
+
+        if override:
+            if backup:
+                ml_utils.backup_folder(training_config.model_dir)
+            else:
+                shutil.rmtree(training_config.model_dir)
+
+        device = ml_utils.get_available_device()
+        model = model_model.DiffWave(model_config).to(device)
+        # train_impl(0, model, dataset, args, params)
+
+        opt = torch.optim.Adam(model.parameters(), lr=training_config.learning_rate)
+
+        learner = DiffWaveLearner(model, dataset, opt, training_config)
+        learner.restore()
+        learner.train(device=device)
 
 
 def _nested_map(struct, map_fn):
-  if isinstance(struct, tuple):
-    return tuple(_nested_map(x, map_fn) for x in struct)
-  if isinstance(struct, list):
-    return [_nested_map(x, map_fn) for x in struct]
-  if isinstance(struct, dict):
-    return { k: _nested_map(v, map_fn) for k, v in struct.items() }
-  return map_fn(struct)
-
+    if isinstance(struct, tuple):
+        return tuple(_nested_map(x, map_fn) for x in struct)
+    if isinstance(struct, list):
+        return [_nested_map(x, map_fn) for x in struct]
+    if isinstance(struct, dict):
+        return { k: _nested_map(v, map_fn) for k, v in struct.items() }
+    return map_fn(struct)
 
 class DiffWaveLearner:
-  def __init__(self, model_dir, model, dataset, optimizer, params, *args, **kwargs):
-    os.makedirs(model_dir, exist_ok=True)
-    self.model_dir = model_dir
-    self.model = model
-    self.dataset = dataset
-    self.optimizer = optimizer
-    self.params = params
-    self.autocast = torch.cuda.amp.autocast(enabled=kwargs.get('fp16', False))
-    self.scaler = torch.cuda.amp.GradScaler(enabled=kwargs.get('fp16', False))
-    self.epoch = 0
-    self.is_master = True
-    self.losses=[]
+    def __init__(self,
+                 model: model_model.DiffWave,
+                 dataset: torch_data.Dataset,
+                 optimizer: torch.optim.Optimizer,
+                 training_config: TrainingConfig,
+                 loss_fn = torch_nn.L1Loss()):
 
-    beta = np.array(self.params.noise_schedule)
-    noise_level = np.cumprod(1 - beta)
-    self.noise_level = torch.tensor(noise_level.astype(np.float32))
-    self.loss_fn = nn.L1Loss()
-    self.summary_writer = None
+        os.makedirs(training_config.model_dir, exist_ok=True)
+        self.model_dir = training_config.model_dir
+        self.model = model
+        self.dataset = dataset
+        self.optimizer = optimizer
+        self.config = training_config
+        self.loss_fn = loss_fn
 
-  def state_dict(self):
-    if hasattr(self.model, 'module') and isinstance(self.model.module, nn.Module):
-      model_state = self.model.module.state_dict()
-    else:
-      model_state = self.model.state_dict()
-    return {
-        'epoch': self.epoch,
-        'model': { k: v.cpu() if isinstance(v, torch.Tensor) else v for k, v in model_state.items() },
-        'optimizer': { k: v.cpu() if isinstance(v, torch.Tensor) else v for k, v in self.optimizer.state_dict().items() },
-        'params': dict(self.params),
-        'scaler': self.scaler.state_dict(),
-        'losses': self.losses,
-    }
+        self.epoch = 0
+        self.losses=[]
 
-  def load_state_dict(self, state_dict):
-    if hasattr(self.model, 'module') and isinstance(self.model.module, nn.Module):
-      self.model.module.load_state_dict(state_dict['model'])
-    else:
-      self.model.load_state_dict(state_dict['model'])
-    self.optimizer.load_state_dict(state_dict['optimizer'])
-    self.scaler.load_state_dict(state_dict['scaler'])
-    self.epoch = state_dict['epoch']
-    self.losses = state_dict['losses']
+        self.noise_level = self.model.get_noise_level()
+        self.summary_writer = None
 
-  def save_to_checkpoint(self, filename='weights'):
-    save_basename = f'{filename}-{self.epoch}.pt'
-    save_name = f'{self.model_dir}/{save_basename}'
-    link_name = f'{self.model_dir}/{filename}.pt'
-    plt.plot(self.losses)
-    plt.savefig(f'{self.model_dir}/loss.png')
-    plt.close()
-    torch.save(self.state_dict(), save_name)
-    
+        self.restore()
 
-    if os.name == 'nt':
-      torch.save(self.state_dict(), link_name)
-    else:
-      if os.path.islink(link_name):
-        os.unlink(link_name)
-      os.symlink(save_basename, link_name)
+    def save(self, filename='weights'):
+        save_basename = f'{filename}-{self.epoch}.pt'
+        save_name = os.path.join(self.model_dir, save_basename)
+        link_name = os.path.join(self.model_dir, f'{filename}.pt')
 
-  def restore_from_checkpoint(self, filename='weights'):
-    try:
-      checkpoint = torch.load(f'{self.model_dir}/{filename}.pt')
-      self.load_state_dict(checkpoint)
-      return True
-    except FileNotFoundError:
-      return False
+        model_state = {
+                'model': { k: v.cpu() if isinstance(v, torch.Tensor) else v
+                            for k, v in self.model.state_dict().items() },
+                'optimizer': { k: v.cpu() if isinstance(v, torch.Tensor) else v
+                            for k, v in self.optimizer.state_dict().items() },
+                'epoch': self.epoch,
+                'losses': self.losses
+        }
 
-  def train(self, max_steps=None):
-    device = next(self.model.parameters()).device
-    num_batches = len(self.dataset)
-    
-     
-    with tqdm(desc='Epoch', total=max_steps if max_steps else None, leave=False, position=0, initial=self.epoch) as epoch_pbar:
-           
-      while True:
-        for features in tqdm(self.dataset, desc=f'Batch', leave=False, position=1):
-          if max_steps is not None and self.epoch > max_steps:
-            return
-          features = _nested_map(features, lambda x: x.to(device) if isinstance(x, torch.Tensor) else x)
-          loss = self.train_step(features)
-          self.losses.append(loss.item())
-          if torch.isnan(loss).any():
-            raise RuntimeError(f'Detected NaN loss at epoch {self.epoch}.')
-          if self.is_master:
-            if self.epoch % self.params.n_check == 0:
-              self.save_to_checkpoint()   
-            #if self.step % 50 == 0:
-             # self._write_summary(self.step, features, loss)
-            #if self.step % len(self.dataset) == 0:
-             # self.save_to_checkpoint()
-          
-        
-        epoch_pbar.update(1)
-        self.epoch += 1
-        
-                        
+        torch.save(model_state, save_name)
 
-  def train_step(self, features):
-    for param in self.model.parameters():
-      param.grad = None
+        if os.path.islink(link_name):
+            os.unlink(link_name)
+        os.symlink(save_basename, link_name)
 
-    audio = features['audio']
-    spectrogram = features['spectrogram']
+        plt.plot(self.losses)
+        plt.savefig(os.path.join(self.model_dir, 'loss.png'))
+        plt.close()
 
-    N, T = audio.shape
-    device = audio.device
-    self.noise_level = self.noise_level.to(device)
+    def restore(self, filename='weights'):
+        try:
+            link_name = os.path.join(self.model_dir, f'{filename}.pt')
+            checkpoint = torch.load(link_name)
+            self.model.load_state_dict(checkpoint['model'])
+            self.optimizer.load_state_dict(checkpoint['optimizer'])
+            self.epoch = checkpoint['epoch']
+            self.losses = checkpoint['losses']
+            return True
+        except FileNotFoundError:
+            return False
 
-    with self.autocast:
-      t = torch.randint(0, len(self.params.noise_schedule), [N], device=audio.device)
-      noise_scale = self.noise_level[t].unsqueeze(1)
-      noise_scale_sqrt = noise_scale**0.5
-      noise = torch.randn_like(audio)
-      noisy_audio = noise_scale_sqrt * audio + (1.0 - noise_scale)**0.5 * noise
+    def train(self, device: torch.device):
 
-      predicted = self.model(noisy_audio, t, spectrogram)
-      loss = self.loss_fn(noise, predicted.squeeze(1))
+        dataloader = torch.utils.data.DataLoader(
+            self.dataset,
+            self.config.batch_size,
+            shuffle=True)
 
-    self.scaler.scale(loss).backward()
-    self.scaler.unscale_(self.optimizer)
-    self.grad_norm = nn.utils.clip_grad_norm_(self.model.parameters(), self.params.max_grad_norm or 1e9)
-    self.scaler.step(self.optimizer)
-    self.scaler.update()
-    return loss
+        max_steps = self.config.max_steps if self.config.max_steps else None
 
-  def _write_summary(self, step, features, loss):
-    writer = self.summary_writer or SummaryWriter(self.model_dir, purge_step=step)
-    writer.add_audio('feature/audio', features['audio'][0], step, sample_rate=self.params.sample_rate)
-    if not self.params.unconditional:
-      writer.add_image('feature/spectrogram', torch.flip(features['spectrogram'][:1], [1]), step)
-    writer.add_scalar('train/loss', loss, step)
-    writer.add_scalar('train/grad_norm', self.grad_norm, step)
-    writer.flush()
-    self.summary_writer = writer
+        with tqdm.tqdm(desc='Epoch', total=max_steps, leave=False,
+                        position=0, initial=self.epoch) as epoch_pbar:
 
+            while True:
+                for batch_data, _ in tqdm.tqdm(dataloader, desc='Batch', leave=False, position=1):
 
-def _train_impl(replica_id, model, dataset, args, params):
-  torch.backends.cudnn.benchmark = True
-  opt = torch.optim.Adam(model.parameters(), lr=params.learning_rate)
+                    if max_steps is not None and self.epoch > max_steps:
+                        return
 
-  learner = DiffWaveLearner(args.model_dir, model, dataset, opt, params, fp16=args.fp16)
-  learner.is_master = (replica_id == 0)
-  learner.restore_from_checkpoint()
+                    loss = self.train_step(batch_data, device)
 
-  learner.train(max_steps=args.max_steps)
+                    if torch.isnan(loss).any():
+                        raise RuntimeError(f'Detected NaN loss at epoch {self.epoch}.')
 
+                    self.losses.append(loss.item())
 
-def train(args, params):
-  if args.data_dirs[0] == 'gtzan':
-    dataset = from_gtzan(params)
-  else:
-    dataset = from_path(args.data_dirs, params)
-  model = DiffWave(params).cuda()
-  _train_impl(0, model, dataset, args, params)
+                    if self.epoch % self.config.epoch_save_interval == 0:
+                        self.save()
 
+                epoch_pbar.update(1)
+                self.epoch += 1
 
-def train_distributed(replica_id, replica_count, port, args, params):
-  os.environ['MASTER_ADDR'] = 'localhost'
-  os.environ['MASTER_PORT'] = str(port)
-  torch.distributed.init_process_group('nccl', rank=replica_id, world_size=replica_count)
-  if args.data_dirs[0] == 'gtzan':
-    dataset = from_gtzan(params, is_distributed=True)
-  else:
-    dataset = from_path(args.data_dirs, params, is_distributed=True)
-  device = torch.device('cuda', replica_id)
-  torch.cuda.set_device(device)
-  model = DiffWave(params).to(device)
-  model = DistributedDataParallel(model, device_ids=[replica_id])
-  _train_impl(replica_id, model, dataset, args, params)
+        self.save()
+
+    def train_step(self, batch_data: torch.Tensor, device: torch.device):
+
+        self.optimizer.zero_grad()
+
+        # sample_data = _nested_map(sample_data, lambda x: x.to(device) if isinstance(x, torch.Tensor) else x)
+        batch_data = batch_data.to(device)
+        bacth_samples, _ = batch_data.shape
+        self.noise_level = self.noise_level.to(device)
+
+        t = torch.randint(0, len(self.model.config.noise_schedule), [bacth_samples], device=device)
+        noise_scale = self.noise_level[t].unsqueeze(1)
+        noise_scale_sqrt = noise_scale**0.5
+        noise = torch.randn_like(batch_data)
+        noisy_audio = noise_scale_sqrt * batch_data + (1.0 - noise_scale)**0.5 * noise
+
+        predicted = self.model(noisy_audio, t)
+        loss = self.loss_fn(noise, predicted.squeeze(1))
+
+        loss.backward()
+        torch.nn.utils.clip_grad_norm_(self.model.parameters(), self.config.max_grad_norm)
+        self.optimizer.step()
+
+        return loss

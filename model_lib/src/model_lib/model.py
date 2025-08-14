@@ -1,165 +1,184 @@
-# Copyright 2020 LMNT, Inc. All Rights Reserved.
-#
-# Licensed under the Apache License, Version 2.0 (the "License");
-# you may not use this file except in compliance with the License.
-# You may obtain a copy of the License at
-#
-#     http://www.apache.org/licenses/LICENSE-2.0
-#
-# Unless required by applicable law or agreed to in writing, software
-# distributed under the License is distributed on an "AS IS" BASIS,
-# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-# See the License for the specific language governing permissions and
-# limitations under the License.
-# ==============================================================================
+import typing
+import math
+import argparse
 
 import numpy as np
+
 import torch
-import torch.nn as nn
-import torch.nn.functional as F
+import torch.nn as torch_nn
+import torch.nn.functional as torch_func
 
-from math import sqrt
+class UnconditionalConfig():
+    def __init__(self,
+            residual_layers: int = 10,
+            residual_channels: int = 21,
+            dilation_cycle_length: int = 10,
+            noise_schedule: np.array = np.linspace(1e-4, 0.05, 10).tolist(),
+            inference_noise_schedule: typing.List[float] = [0.0001, 0.001, 0.01, 0.05, 0.2, 0.5],
+            embedding_encoding_size: int = 128,
+            embedding_size: int = 512,
+            embedding_cycles: int = 4
+            ):
+        self.residual_layers = residual_layers
+        self.residual_channels = residual_channels
+        self.dilation_cycle_length = dilation_cycle_length
+        self.noise_schedule = noise_schedule
+        self.inference_noise_schedule = inference_noise_schedule
+        self.embedding_encoding_size = embedding_encoding_size
+        self.embedding_size = embedding_size
+        self.embedding_cycles = embedding_cycles
 
+    @staticmethod
+    def add_arg_opt(parser: argparse.ArgumentParser) -> None:
+        group = parser.add_argument_group("UnconditionalConfig")
+        group.add_argument('--residual_layers', type=int, default=10)
+        group.add_argument('--residual_channels', type=int, default=21)
+        group.add_argument('--dilation_cycle_length', type=int, default=10)
+        group.add_argument('--noise_schedule', type=str, default='1e-4,0.05,10')
+        group.add_argument('--inference_noise_schedule', type=str, default='0.0001,0.001,0.01,0.05,0.2,0.5')
+        group.add_argument('--embedding_encoding_size', type=int, default=128)
+        group.add_argument('--embedding_size', type=int, default=512)
+        group.add_argument('--embedding_cycles', type=int, default=4)
 
-Linear = nn.Linear
-ConvTranspose2d = nn.ConvTranspose2d
+    @staticmethod
+    def from_argparse(args: argparse.Namespace) -> "UnconditionalConfig":
+        # noise_schedule: format 'start,end,num_points'
+        noise_schedule = list(map(float, args.noise_schedule.split(',')))
+        if len(noise_schedule) == 3:
+            noise_schedule = np.linspace(*noise_schedule[:-1], int(noise_schedule[-1])).tolist()
+        else:
+            noise_schedule = noise_schedule
 
+        inference_noise_schedule = list(map(float, args.inference_noise_schedule.split(',')))
+
+        return UnconditionalConfig(
+            residual_layers=args.residual_layers,
+            residual_channels=args.residual_channels,
+            dilation_cycle_length=args.dilation_cycle_length,
+            noise_schedule=noise_schedule,
+            inference_noise_schedule=inference_noise_schedule,
+            embedding_encoding_size=args.embedding_encoding_size,
+            embedding_size=args.embedding_size,
+            embedding_cycles=args.embedding_cycles
+        )
 
 def Conv1d(*args, **kwargs):
-  layer = nn.Conv1d(*args, **kwargs)
-  nn.init.kaiming_normal_(layer.weight)
-  return layer
-
+    layer = torch_nn.Conv1d(*args, **kwargs)
+    torch_nn.init.kaiming_normal_(layer.weight)
+    return layer
 
 @torch.jit.script
 def silu(x):
-  return x * torch.sigmoid(x)
+    return x * torch.sigmoid(x)
+
+class DiffusionEmbedding(torch_nn.Module):
+    def __init__(self, config: UnconditionalConfig):
+        super().__init__()
+        self.register_buffer('embedding',
+                             self._build_embedding(len(config.noise_schedule),
+                                                   config.embedding_size,
+                                                   config.embedding_cycles),
+                             persistent=False)
+        self.projection1 = torch_nn.Linear(config.embedding_size, config.embedding_size)
+        self.projection2 = torch_nn.Linear(config.embedding_size, config.embedding_size)
+
+    def forward(self, diffusion_step):
+        if diffusion_step.dtype in [torch.int32, torch.int64]:
+            x = self.embedding[diffusion_step]
+        else:
+            x = self._lerp_embedding(diffusion_step)
+        x = self.projection1(x)
+        x = silu(x)
+        x = self.projection2(x)
+        x = silu(x)
+        return x
+
+    def _lerp_embedding(self, diffusion_step):
+        """ Interpolando o valor do passo t entre o passo anterior e posterior. """
+        low_idx = torch.floor(diffusion_step).long()
+        high_idx = torch.ceil(diffusion_step).long()
+        low = self.embedding[low_idx]
+        high = self.embedding[high_idx]
+        return low + (high - low) * (diffusion_step - low_idx)
+
+    def _build_embedding(self, n_diffusion_steps: int, encoding_size: int, cycles: int):
+        # [T,1]                 -> [0, 1, ..., 50]
+        steps = torch.arange(n_diffusion_steps).unsqueeze(1)
+
+        # [1,encoding_size//2]  -> [0, 1, ..., 64]'
+        dims = torch.arange(encoding_size//2).unsqueeze(0)
+
+        # [T,encoding_size//2]  -> x = t * 10^((4 * n)/(63))
+        table = steps * 10.0**(dims * cycles / (encoding_size//2-1.0))
+
+        # [T,encoding_size]     -> [sin(x) cos(x)]
+        table = torch.cat([torch.sin(table), torch.cos(table)], dim=1)
+
+        return table
 
 
-class DiffusionEmbedding(nn.Module):
-  def __init__(self, max_steps):
-    super().__init__()
-    self.register_buffer('embedding', self._build_embedding(max_steps), persistent=False)
-    self.projection1 = Linear(128, 512)
-    self.projection2 = Linear(512, 512)
+class ResidualBlock(torch_nn.Module):
+    def __init__(self, index: int, config: UnconditionalConfig):
+        super().__init__()
+        dilation = 2**(index % config.dilation_cycle_length)
+        self.diffusion_projection = torch_nn.Linear(config.embedding_size,
+                                                    config.residual_channels)
+        self.dilated_conv = Conv1d(config.residual_channels,
+                                   2 * config.residual_channels,
+                                   3,
+                                   padding=dilation,
+                                   dilation=dilation)
+        self.output_projection = Conv1d(config.residual_channels,
+                                        2 * config.residual_channels,
+                                        1)
 
-  def forward(self, diffusion_step):
-    if diffusion_step.dtype in [torch.int32, torch.int64]:
-      x = self.embedding[diffusion_step]
-    else:
-      x = self._lerp_embedding(diffusion_step)
-    x = self.projection1(x)
-    x = silu(x)
-    x = self.projection2(x)
-    x = silu(x)
-    return x
+    def forward(self, x, diffusion_step):
+        diffusion_step = self.diffusion_projection(diffusion_step).unsqueeze(-1)
+        y = x + diffusion_step
+        y = self.dilated_conv(y)
 
-  def _lerp_embedding(self, t):
-    low_idx = torch.floor(t).long()
-    high_idx = torch.ceil(t).long()
-    low = self.embedding[low_idx]
-    high = self.embedding[high_idx]
-    return low + (high - low) * (t - low_idx)
+        chunk1, chunk2 = torch.chunk(y, 2, dim=1)
+        y = torch.sigmoid(chunk1) * torch.tanh(chunk2)
 
-  def _build_embedding(self, max_steps):
-    steps = torch.arange(max_steps).unsqueeze(1)  # [T,1]
-    dims = torch.arange(64).unsqueeze(0)          # [1,64]
-    table = steps * 10.0**(dims * 4.0 / 63.0)     # [T,64]
-    table = torch.cat([torch.sin(table), torch.cos(table)], dim=1)
-    return table
+        y = self.output_projection(y)
+        residual, skip = torch.chunk(y, 2, dim=1)
+        return (x + residual) / math.sqrt(2.0), skip
 
 
-class SpectrogramUpsampler(nn.Module):
-  def __init__(self, n_mels):
-    super().__init__()
-    self.conv1 = ConvTranspose2d(1, 1, [3, 32], stride=[1, 16], padding=[1, 8])
-    self.conv2 = ConvTranspose2d(1, 1,  [3, 32], stride=[1, 16], padding=[1, 8])
+class DiffWave(torch_nn.Module):
+    def __init__(self, config: UnconditionalConfig):
+        super().__init__()
+        self.config = config
+        self.input_projection = Conv1d(1, config.residual_channels, 1)
+        self.diffusion_embedding = DiffusionEmbedding(config)
 
-  def forward(self, x):
-    x = torch.unsqueeze(x, 1)
-    x = self.conv1(x)
-    x = F.leaky_relu(x, 0.4)
-    x = self.conv2(x)
-    x = F.leaky_relu(x, 0.4)
-    x = torch.squeeze(x, 1)
-    return x
+        self.residual_layers = torch_nn.ModuleList([
+              ResidualBlock(i, config) for i in range(config.residual_layers)
+        ])
+        self.skip_projection = Conv1d(config.residual_channels, config.residual_channels, 1)
+        self.output_projection = Conv1d(config.residual_channels, 1, 1)
+        torch_nn.init.zeros_(self.output_projection.weight)
 
+    def forward(self, audio, diffusion_step):
+        x = audio.unsqueeze(1)
+        x = self.input_projection(x)
+        x = torch_func.relu(x)
 
-class ResidualBlock(nn.Module):
-  def __init__(self, n_mels, residual_channels, dilation, uncond=False):
-    '''
-    :param n_mels: inplanes of conv1x1 for spectrogram conditional
-    :param residual_channels: audio conv
-    :param dilation: audio conv dilation
-    :param uncond: disable spectrogram conditional
-    '''
-    super().__init__()
-    self.dilated_conv = Conv1d(residual_channels, 2 * residual_channels, 3, padding=dilation, dilation=dilation)
-    self.diffusion_projection = Linear(512, residual_channels)
-    if not uncond: # conditional model
-      self.conditioner_projection = Conv1d(n_mels, 2 * residual_channels, 1)
-    else: # unconditional model
-      self.conditioner_projection = None
+        step_embedded = self.diffusion_embedding(diffusion_step)
 
-    self.output_projection = Conv1d(residual_channels, 2 * residual_channels, 1)
+        skip = None
+        for layer in self.residual_layers:
+            x, skip_connection = layer(x, step_embedded)
+            skip = skip_connection if skip is None else skip_connection + skip
 
-  def forward(self, x, diffusion_step, conditioner=None):
-    assert (conditioner is None and self.conditioner_projection is None) or \
-           (conditioner is not None and self.conditioner_projection is not None)
+        x = skip / math.sqrt(len(self.residual_layers))
+        x = self.skip_projection(x)
+        x = torch_func.relu(x)
+        x = self.output_projection(x)
+        return x
 
-    diffusion_step = self.diffusion_projection(diffusion_step).unsqueeze(-1)
-    y = x + diffusion_step
-    if self.conditioner_projection is None: # using a unconditional model
-      y = self.dilated_conv(y)
-    else:
-      conditioner = self.conditioner_projection(conditioner)
-      y = self.dilated_conv(y) + conditioner
-
-    gate, filter = torch.chunk(y, 2, dim=1)
-    y = torch.sigmoid(gate) * torch.tanh(filter)
-
-    y = self.output_projection(y)
-    residual, skip = torch.chunk(y, 2, dim=1)
-    return (x + residual) / sqrt(2.0), skip
-
-
-class DiffWave(nn.Module):
-  def __init__(self, params):
-    super().__init__()
-    self.params = params
-    self.input_projection = Conv1d(1, params.residual_channels, 1)
-    self.diffusion_embedding = DiffusionEmbedding(len(params.noise_schedule))
-    if self.params.unconditional: # use unconditional model
-      self.spectrogram_upsampler = None
-    else:
-      self.spectrogram_upsampler = SpectrogramUpsampler(params.n_mels)
-
-    self.residual_layers = nn.ModuleList([
-        ResidualBlock(params.n_mels, params.residual_channels, 2**(i % params.dilation_cycle_length), uncond=params.unconditional)
-        for i in range(params.residual_layers)
-    ])
-    self.skip_projection = Conv1d(params.residual_channels, params.residual_channels, 1)
-    self.output_projection = Conv1d(params.residual_channels, 1, 1)
-    nn.init.zeros_(self.output_projection.weight)
-
-  def forward(self, audio, diffusion_step, spectrogram=None):
-    assert (spectrogram is None and self.spectrogram_upsampler is None) or \
-           (spectrogram is not None and self.spectrogram_upsampler is not None)
-    x = audio.unsqueeze(1)
-    x = self.input_projection(x)
-    x = F.relu(x)
-
-    diffusion_step = self.diffusion_embedding(diffusion_step)
-    if self.spectrogram_upsampler: # use conditional model
-      spectrogram = self.spectrogram_upsampler(spectrogram)
-
-    skip = None
-    for layer in self.residual_layers:
-      x, skip_connection = layer(x, diffusion_step, spectrogram)
-      skip = skip_connection if skip is None else skip_connection + skip
-
-    x = skip / sqrt(len(self.residual_layers))
-    x = self.skip_projection(x)
-    x = F.relu(x)
-    x = self.output_projection(x)
-    return x
+    def get_noise_level(self):
+        beta = np.array(self.config.noise_schedule)
+        noise_level = np.cumprod(1 - beta)
+        noise_level = torch.tensor(noise_level.astype(np.float32))
+        return noise_level

@@ -20,8 +20,8 @@ import torchaudio
 
 from argparse import ArgumentParser
 
-from model_lib.params import AttrDict, params as base_params
-from model_lib.model import DiffWave
+from model_lib.old.params import AttrDict, params as base_params
+from model_lib.old.model import DiffWave
 
 
 models = {}

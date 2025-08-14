@@ -1,166 +1,258 @@
-# Copyright 2020 LMNT, Inc. All Rights Reserved.
-#
-# Licensed under the Apache License, Version 2.0 (the "License");
-# you may not use this file except in compliance with the License.
-# You may obtain a copy of the License at
-#
-#     http://www.apache.org/licenses/LICENSE-2.0
-#
-# Unless required by applicable law or agreed to in writing, software
-# distributed under the License is distributed on an "AS IS" BASIS,
-# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-# See the License for the specific language governing permissions and
-# limitations under the License.
-# ==============================================================================
+"""
+Module to load audio detections and background data as PyTorch datasets.
+
+This module defines tools for segmenting WAV files into blocks and loading them
+as a PyTorch-compatible dataset. It includes an abstract interface for audio
+block processing, a concrete window-based segmentation class, and a dataset class
+that reads audio files from a directory and maps them into labeled examples.
+
+To prepare audio files for this dataset, run: `test/prepare_dataset.py`.
+"""
+
+import typing
+import abc
+import pathlib
+import wave
 
 import numpy as np
-import os
-import random
+import pandas as pd
+
 import torch
-import torch.nn.functional as F
-import torchaudio
+import torch.utils.data as torch_data
 
-from glob import glob
-from torch.utils.data.distributed import DistributedSampler
+import lps_utils.utils as lps_utils
 
 
-class ConditionalDataset(torch.utils.data.Dataset):
-  def __init__(self, paths):
-    super().__init__()
-    self.filenames = []
-    for path in paths:
-      self.filenames += glob(f'{path}/**/*.wav', recursive=True)
+class DataProcessing(abc.ABC):
+    """
+    Abstract base class for processing audio data into blocks.
+    """
 
-  def __len__(self):
-    return len(self.filenames)
+    @abc.abstractmethod
+    def get_n_blocks(self, wav_file: wave.Wave_read) -> int:
+        """
+        Return the number of blocks that can be extracted from the WAV file.
 
-  def __getitem__(self, idx):
-    audio_filename = self.filenames[idx]
-    spec_filename = f'{audio_filename}.spec.npy'
-    signal, _ = torchaudio.load(audio_filename)
-    spectrogram = np.load(spec_filename)
-    return {
-        'audio': signal[0],
-        'spectrogram': spectrogram.T
-    }
+        Args:
+            wav_file (wave.Wave_read): Opened WAV file handle.
 
+        Returns:
+            int: Number of extractable blocks.
+        """
 
-class UnconditionalDataset(torch.utils.data.Dataset):
-  def __init__(self, paths):
-    super().__init__()
-    self.filenames = []
-    for path in paths:
-      self.filenames += glob(f'{path}/**/*.wav', recursive=True)
+    @abc.abstractmethod
+    def get(self, wav_file: wave.Wave_read, block_id: int) -> np.ndarray:
+        """
+        Extract a specific block of audio data from the WAV file.
 
-  def __len__(self):
-    return len(self.filenames)
+        Args:
+            wav_file (wave.Wave_read): Opened WAV file handle.
+            block_id (int): Block index to extract.
 
-  def __getitem__(self, idx):
-    audio_filename = self.filenames[idx]
-    spec_filename = f'{audio_filename}.spec.npy'
-    signal, _ = torchaudio.load(audio_filename)
-    return {
-        'audio': signal[0],
-        'spectrogram': None
-    }
+        Returns:
+            np.ndarray: Audio block as a NumPy array.
+        """
 
 
-class Collator:
-  def __init__(self, params):
-    self.params = params
+class SplitWindow(DataProcessing):
+    """
+    Splits a WAV file into overlapping or non-overlapping fixed-size windows.
+    """
 
-  def collate(self, minibatch):
-    samples_per_frame = self.params.hop_samples
-    for record in minibatch:
-      if self.params.unconditional:
-          # Filter out records that aren't long enough.
-          if len(record['audio']) < self.params.audio_len:
-            del record['spectrogram']
-            del record['audio']
-            continue
+    def __init__(self, window: int, overlap: int):
+        """
+        Initialize SplitWindow processor.
 
-          start = random.randint(0, record['audio'].shape[-1] - self.params.audio_len)
-          end = start + self.params.audio_len
-          record['audio'] = record['audio'][start:end]
-          record['audio'] = np.pad(record['audio'], (0, (end - start) - len(record['audio'])), mode='constant')
-      else:
-          # Filter out records that aren't long enough.
-          if len(record['spectrogram']) < self.params.crop_mel_frames:
-            del record['spectrogram']
-            del record['audio']
-            continue
+        Args:
+            window (int): Size of each window in samples.
+            overlap (int): Number of overlapping samples between windows.
+        """
+        self.window = window
+        self.overlap = overlap
+        self.hop_size = window - overlap
 
-          start = random.randint(0, record['spectrogram'].shape[0] - self.params.crop_mel_frames)
-          end = start + self.params.crop_mel_frames
-          record['spectrogram'] = record['spectrogram'][start:end].T
+    def get_n_blocks(self, wav_file: wave.Wave_read) -> int:
+        """
+        Return number of blocks available in the WAV file using window and overlap.
 
-          start *= samples_per_frame
-          end *= samples_per_frame
-          record['audio'] = record['audio'][start:end]
-          record['audio'] = np.pad(record['audio'], (0, (end-start) - len(record['audio'])), mode='constant')
+        Args:
+            wav_file (wave.Wave_read): Opened WAV file.
 
-    audio = np.stack([record['audio'] for record in minibatch if 'audio' in record])
-    if self.params.unconditional:
-        return {
-            'audio': torch.from_numpy(audio),
-            'spectrogram': None,
-        }
-    spectrogram = np.stack([record['spectrogram'] for record in minibatch if 'spectrogram' in record])
-    return {
-        'audio': torch.from_numpy(audio),
-        'spectrogram': torch.from_numpy(spectrogram),
-    }
+        Returns:
+            int: Number of extractable windows.
+        """
+        total_frames = wav_file.getnframes()
+        if total_frames < self.window:
+            return 0
+        return int((total_frames - self.window) // self.hop_size + 1)
 
-  # for gtzan
-  def collate_gtzan(self, minibatch):
-    ldata = []
-    mean_audio_len = self.params.audio_len # change to fit in gpu memory
-    # audio total generated time = audio_len * sample_rate
-    # GTZAN statistics
-    # max len audio 675808; min len audio sample 660000; mean len audio sample 662117
-    # max audio sample 1; min audio sample -1; mean audio sample -0.0010 (normalized)
-    # sample rate of all is 22050
-    for data in minibatch:
-      if data[0].shape[-1] < mean_audio_len:  # pad
-        data_audio = F.pad(data[0], (0, mean_audio_len - data[0].shape[-1]), mode='constant', value=0)
-      elif data[0].shape[-1] > mean_audio_len:  # crop
-        start = random.randint(0, data[0].shape[-1] - mean_audio_len)
-        end = start + mean_audio_len
-        data_audio = data[0][:, start:end]
-      else:
-        data_audio = data[0]
-      ldata.append(data_audio)
-    audio = torch.cat(ldata, dim=0)
-    return {
-          'audio': audio,
-          'spectrogram': None,
-    }
+    def get(self, wav_file: wave.Wave_read, block_id: int) -> torch.Tensor:
+        """
+        Extract the `block_id`-th window from the WAV file.
 
+        Args:
+            wav_file (wave.Wave_read): Opened WAV file.
+            block_id (int): Index of the block to extract.
 
-def from_path(data_dirs, params, is_distributed=False):
-  if params.unconditional:
-    dataset = UnconditionalDataset(data_dirs)
-  else:#with condition
-    dataset = ConditionalDataset(data_dirs)
-  return torch.utils.data.DataLoader(
-      dataset,
-      batch_size=params.batch_size,
-      collate_fn=Collator(params).collate,
-      shuffle=not is_distributed,
-      num_workers=os.cpu_count(),
-      sampler=DistributedSampler(dataset) if is_distributed else None,
-      pin_memory=True,
-      drop_last=True)
+        Returns:
+            np.ndarray: Extracted audio data as a NumPy array.
+        """
+        start = block_id * self.hop_size
+        wav_file.setpos(start)
+        raw_data = wav_file.readframes(self.window)
+
+        sample_width = wav_file.getsampwidth()
+        n_channels = wav_file.getnchannels()
+
+        dtype = {
+            1: np.uint8,   # WAV 8-bit: unsigned
+            2: np.int16,   # WAV 16-bit: signed
+            3: np.int32,   # WAV 24-bit: handled as 32-bit
+            4: np.int32    # WAV 32-bit: signed
+        }.get(sample_width)
+
+        if dtype is None:
+            raise ValueError(f"Sample width {sample_width} bytes not supported.")
+
+        raw_data = np.frombuffer(raw_data, dtype=dtype)
+
+        if n_channels > 1:
+            raw_data = raw_data.reshape(-1, n_channels)
+
+        tensor = torch.from_numpy(raw_data.copy()).float()
+
+        if sample_width == 1: #unsigned
+            # uint8: convert from [0, 255] to [-1, 1]
+            tensor = (tensor - 128.0) / 128.0
+        else: #signed
+            max_val = float(2 ** (8 * sample_width - 1))
+            tensor = tensor / max_val
+
+        return tensor
 
 
-def from_gtzan(params, is_distributed=False):
-  dataset = torchaudio.datasets.GTZAN('./data', download=True)
-  return torch.utils.data.DataLoader(
-      dataset,
-      batch_size=params.batch_size,
-      collate_fn=Collator(params).collate_gtzan,
-      shuffle=not is_distributed,
-      num_workers=os.cpu_count(),
-      sampler=DistributedSampler(dataset) if is_distributed else None,
-      pin_memory=True,
-      drop_last=True)
+class FolderDataset(torch_data.Dataset):
+    """
+    A PyTorch Dataset for loading and processing blocks from WAV files in a folder.
+
+    Each file is assumed to belong to a target class (derived from its folder name),
+    and split into fixed-size blocks using a DataProcessing instance.
+    """
+
+    @staticmethod
+    def _default_extract_target_id(path: pathlib.PurePath) -> str:
+        """
+        Default method to extract target class from file path.
+
+        Args:
+            path (pathlib.PurePath): Path to the audio file.
+
+        Returns:
+            str: Class name (folder name).
+        """
+        return path.parent.name
+
+    @staticmethod
+    def _default_extract_file_id(path: pathlib.PurePath) -> str:
+        """
+        Default method to extract file ID from file path.
+
+        Args:
+            path (pathlib.PurePath): Path to the audio file.
+
+        Returns:
+            str: File ID (filename without extension).
+        """
+        return path.stem
+
+    def __init__(self,
+                 base_dir: str,
+                 processing: DataProcessing,
+                 extract_target_id: typing.Callable[[pathlib.PurePath], str] =
+                        _default_extract_target_id,
+                 extract_file_id: typing.Callable[[pathlib.PurePath], str] =
+                        _default_extract_file_id):
+        """
+        Initialize the dataset from a base directory of audio files.
+
+        Args:
+            base_dir (str): Directory containing WAV files.
+            processing (DataProcessing): Processor to extract data blocks.
+            extract_target_id (Callable): Function to extract class label from path.
+            extract_file_id (Callable): Function to extract file ID from path.
+        """
+        self.class_list = []
+        self.files = []
+        self.processing = processing
+        self.limit_ids = [0]
+
+        files = lps_utils.find_files(base_dir)
+        for filename in files:
+            path = pathlib.Path(filename)
+            file_id = extract_file_id(path)
+            target_id = extract_target_id(path)
+
+            if target_id not in self.class_list:
+                self.class_list.append(target_id)
+
+            wav_file = wave.open(filename)
+            n_blocks = processing.get_n_blocks(wav_file)
+            wav_file.close()
+
+            if n_blocks > 0:
+                self.limit_ids.append(self.limit_ids[-1] + n_blocks)
+
+                self.files.append({
+                    "id": file_id,
+                    "filename": filename,
+                    "target": target_id,
+                    "n_blocks": n_blocks
+                })
+
+        self.class_list.sort()
+
+        self.df = pd.DataFrame(self.files)[["id", "n_blocks", "filename", "target"]]
+
+    def __str__(self) -> str:
+        return str(self.df)
+
+    def __len__(self):
+        return self.limit_ids[-1]
+
+    def __getitem__(self, index):
+        current_index = next(i for i, limit in enumerate(self.limit_ids) if limit > index) - 1
+        offset_index = index - self.limit_ids[current_index]
+
+        file = self.files[current_index]
+
+        wav_file = wave.open(file["filename"])
+        raw_data = self.processing.get(wav_file, offset_index)
+        wav_file.close()
+
+        target_index = self.class_list.index(file["target"])
+
+        return raw_data, target_index
+
+
+if __name__ == "__main__":
+    import argparse
+
+    parser = argparse.ArgumentParser(description="Process data from a folder.")
+    parser.add_argument("folder", type=str, help="Path to the folder containing the data")
+    args = parser.parse_args()
+
+    dataset = FolderDataset(base_dir=args.folder,
+                            processing=SplitWindow(22050, 0))
+
+    print(len(dataset))
+    print(dataset.class_list)
+    print(dataset)
+
+    dataloader = torch.utils.data.DataLoader(
+        dataset,
+        32,
+        shuffle=True)
+
+    for sample_data, _ in dataloader:
+        print(sample_data.shape)
+        break
