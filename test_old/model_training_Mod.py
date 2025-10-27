@@ -71,7 +71,7 @@ class MyDataset(Dataset):
         return self.data[idx], self.labels[idx]
 
 # Inicialize o DataLoader com seu dataset
-data_dirs = '/home/vitoria.freire/Documents/trn_data'  
+data_dirs = '/home/leticia.luz/Documents/trn_data'  
 dataset = MyDataset(data_dirs)
 train_loader = DataLoader(dataset, batch_size=16, shuffle=True)
 
@@ -104,7 +104,7 @@ for epoch in range(num_epochs):
     print(f'Epoch {epoch+1}, Loss: {avg_loss:.4f}')
 
 # Salvar a loss em arquivo
-output_dir = '/home/vitoria.freire/Documents/generative_simulator/test/logs'
+output_dir = '/home/leticia.luz/Documents/generative_simulator/test/logs'
 output_path = f'{output_dir}/loss_log.txt'
 
 
