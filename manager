@@ -115,10 +115,6 @@ case "$1" in
 			cd "$script_path/$sub/src"
 			pip install -e . --user
 		done
-
-		cd "$script_path/model_lib/src"
-		pip install -e . --user
-		cd "$script_path"
 	;;
 
 	deploy)
@@ -135,7 +131,7 @@ case "$1" in
 		do
 			cd "$script_path/$sub"
 			grep --color -nR TODO
-			
+
 		done
 	;;
 
@@ -151,14 +147,14 @@ case "$1" in
 		cd "$script_path"
 		find . -path './lps_libraries' -prune -o -name '*.py' -print | xargs wc -l | tail -n 1
 	;;
-	
+
 	pack)
 		#$script_full clean
 		file_name=$(date +"$dir_name"_%Y-%m-%d_%H:%M.tar.gz)
 		echo "Compressing... "
 		cd ../
 		tar -czf "./$file_name" $dir_name
-		
+
 		if [ "$2" != "" ]; then
 			md5_bf=`md5sum $file_name | cut -d " " -f1`
 			echo md5sum: $md5
@@ -174,7 +170,7 @@ case "$1" in
 			echo md5sum: $md5
 		fi
 	;;
-	
+
 	list)
 		echo check_libs status log pull push install deploy todo count pack list
 	;;
@@ -184,7 +180,7 @@ case "$1" in
 		echo "Details in: $script_full"
 		exit 1
 	;;
-esac 
- 
+esac
+
 exit 0
 
